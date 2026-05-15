@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <sys/time.h>
+#include <errno.h>
 
 #ifndef _WIN32
 #	include <poll.h>
@@ -84,6 +85,9 @@ int udpclient(int argc, char* argv[])
 	struct sockaddr_in src, dest, rsrc;
 	struct hostent* hp;
 	uint32_t timeexc_ip;
+    struct pollfd *fds = NULL;
+    int fds_size = 0;
+
 	signal(SIGINT, &signal_handler);
 	i = 0;
     if(argc > i && (strchr(argv[i], ':') || strchr(argv[i], '.')))
@@ -163,8 +167,16 @@ int udpclient(int argc, char* argv[])
 
         int num_clients = LIST_LEN(clients);
         int num_conn_clients = LIST_LEN(conn_clients);
-        int total_fds = 1 + num_conn_clients + num_clients * 2;
-        struct pollfd *fds = malloc(sizeof(struct pollfd) * total_fds);
+        int needed_fds = 1 + num_conn_clients + num_clients * 2;
+
+        if (needed_fds > fds_size) {
+            fds_size = needed_fds + 10;
+            fds = realloc(fds, sizeof(struct pollfd) * fds_size);
+            if (!fds) {
+                fprintf(stderr, "Error reallocating fds\n");
+                goto done;
+            }
+        }
 
         fds[0].fd = SOCK_FD(tcp_serv);
         fds[0].events = POLLIN;
@@ -209,10 +221,7 @@ int udpclient(int argc, char* argv[])
 			}
 			timeradd(&curr_time, &check_interval, &check_time);
 		}
-		if(ret <= 0) {
-            free(fds);
-            continue;
-        }
+		if(ret <= 0) continue;
 
 		timeexc=0;
 		/* Check if pending TCP connection to accept and create a new client
@@ -241,7 +250,7 @@ int udpclient(int argc, char* argv[])
 
 		/* Check for pending handshakes from UDP connection */
         current_fdi = 1;
-		for(i = 0; i < LIST_LEN(conn_clients); i++) {
+		for(i = 0; i < num_conn_clients; i++) {
 			client = list_get_at(conn_clients, i);
 			if(fds[current_fdi].revents & POLLIN) {
 				tmp_req_id = CLIENT_ID(client);
@@ -252,48 +261,50 @@ int udpclient(int argc, char* argv[])
 										 data, tmp_len);
 				if(ret < 0) {
 					disconnect_and_remove_client(tmp_req_id, conn_clients);
-					i--;
 				} else {
-					client = list_add(clients, client);
-					list_delete_at(conn_clients, i);
-					i--;
+					client2 = list_add(clients, client);
+					list_delete(conn_clients, &tmp_req_id);
 				}
+                /* We modified the list we are iterating over, better re-poll next time */
+                break;
 			}
             current_fdi++;
 		}
 		/* Check if data is ready from any of the clients */
-		for(i = 0; i < LIST_LEN(clients); i++) {
+        /* Skip to the fdi where 'clients' start */
+        current_fdi = 1 + num_conn_clients;
+		for(i = 0; i < num_clients; i++) {
 			client = list_get_at(clients, i);
 			/* Check for UDP data */
 			if(fds[current_fdi].revents & POLLIN) {
+                tmp_req_id = CLIENT_ID(client);
 				ret = client_recv_udp_msg(client, data, sizeof(data),
 										  &tmp_id, &tmp_type, &tmp_len);
 				if(ret == 0)
 					ret = handle_message(client, tmp_id, tmp_type,
 										 data, tmp_len);
 				if(ret < 0) {
-					disconnect_and_remove_client(CLIENT_ID(client), clients);
-					i--;
-                    current_fdi += 2;
-					continue; /* Don't go to check the TCP connection */
+					disconnect_and_remove_client(tmp_req_id, clients);
+                    break;
 				}
 			}
             current_fdi++;
 			/* Check for TCP data */
 			if(fds[current_fdi].revents & POLLIN) {
+                tmp_req_id = CLIENT_ID(client);
 				ret = client_recv_tcp_data(client);
 				if(ret == 0)
 					ret = client_send_udp_data(client);
 				if(ret < 0) {
-					disconnect_and_remove_client(CLIENT_ID(client), clients);
-					i--;
+					disconnect_and_remove_client(tmp_req_id, clients);
+                    break;
 				}
 			}
             current_fdi++;
 		}
-        free(fds);
 	}
 done:
+    if (fds) free(fds);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Cleaning up...\n");
 	if(tcp_serv) {
@@ -306,6 +317,8 @@ done:
 	}
 	if(clients)
 		list_free(clients);
+    if(conn_clients)
+        list_free(conn_clients);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Goodbye.\n");
 	return 0;
