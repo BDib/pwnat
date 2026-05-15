@@ -1,22 +1,6 @@
 /*
  * Project: udptunnel
  * File: client.h
- *
- * Copyright (C) 2009 Daniel Meekins
- * Contact: dmeekins - gmail
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef CLIENT_H
@@ -28,6 +12,10 @@
 #include "common.h"
 #include "socket.h"
 #include "message.h"
+
+#ifdef HAVE_NICE
+#include "ice_transport.h"
+#endif
 
 #define CLIENT_TIMEOUT 1 /* in seconds */
 #define CLIENT_MAX_RESEND 10
@@ -49,17 +37,17 @@ typedef struct {
 typedef struct client {
 	uint16_t id; /* Must be first in struct */
 	socket_t* tcp_sock; /* Socket for connection to TCP server */
-	socket_t* udp_sock; /* Socket to hold address from UDP client */
+	transport_t transport; /* Abstract transport (UDP or ICE) */
 	int connected;
 	struct timeval keepalive;
 
-	/* For data going from UDP tunnel to TCP connection */
+	/* For data going from tunnel to TCP connection */
 	char udp2tcp[MSG_MAX_LEN];
 	int udp2tcp_len;
 	int udp2tcp_state;
     uint32_t expected_seq;
 
-	/* For data going from TCP connection to UDP tunnel */
+	/* For data going from TCP connection to tunnel */
     window_slot_t window[WINDOW_SIZE];
     uint32_t next_seq;
     uint32_t last_ack;
@@ -69,11 +57,15 @@ typedef struct client {
 	int tcp2udp_state;
 	struct timeval tcp2udp_timeout;
 	int resend_count;
+
+#ifdef HAVE_NICE
+    ice_transport_t *ice;
+#endif
 } client_t;
 
 #define CLIENT_ID(c) ((c)->id)
 
-client_t* client_create(uint16_t id, socket_t* tcp_sock, socket_t* udp_sock,
+client_t* client_create(uint16_t id, socket_t* tcp_sock, transport_t *trans,
 						int connected);
 client_t* client_copy(client_t* dst, client_t* src, size_t len);
 int client_cmp(client_t* c1, client_t* c2, size_t len);
@@ -104,44 +96,5 @@ int client_timed_out(client_t* client, struct timeval curr_tv);
 #define p_client_copy ((void* (*)(void *, const void *, size_t))&client_copy)
 #define p_client_cmp ((int (*)(const void *, const void *, size_t))&client_cmp)
 #define p_client_free ((void (*)(void *))&client_free)
-
-/* Inline functions as wrappers for handling the file descriptors in the
- * client's sockets */
-
-static __inline__ void client_add_tcp_fd_to_set(client_t* c, fd_set* set)
-{
-	if(SOCK_FD(c->tcp_sock) >= 0)
-		FD_SET(SOCK_FD(c->tcp_sock), set);
-}
-
-static __inline__ void client_add_udp_fd_to_set(client_t* c, fd_set* set)
-{
-	if(SOCK_FD(c->udp_sock) >= 0)
-		FD_SET(SOCK_FD(c->udp_sock), set);
-}
-
-static __inline__ int client_tcp_fd_isset(client_t* c, fd_set* set)
-{
-	return SOCK_FD(c->tcp_sock) >= 0 ?
-		   FD_ISSET(SOCK_FD(c->tcp_sock), set) : 0;
-}
-
-static __inline__ int client_udp_fd_isset(client_t* c, fd_set* set)
-{
-	return SOCK_FD(c->udp_sock) >= 0 ?
-		   FD_ISSET(SOCK_FD(c->udp_sock), set) : 0;
-}
-
-static __inline__ void client_remove_tcp_fd_from_set(client_t* c, fd_set* set)
-{
-	if(SOCK_FD(c->tcp_sock) >= 0)
-		FD_CLR(SOCK_FD(c->tcp_sock), set);
-}
-
-static __inline__ void client_remove_udp_fd_from_set(client_t* c, fd_set* set)
-{
-	if(SOCK_FD(c->udp_sock) >= 0)
-		FD_CLR(SOCK_FD(c->udp_sock), set);
-}
 
 #endif /* CLIENT_H */

@@ -46,6 +46,7 @@
 #define MSG_TYPE_ACK1		0x08
 #define MSG_TYPE_DATA_SEQ	0x09
 #define MSG_TYPE_ACK_SEQ	0x0A
+#define MSG_TYPE_ICE_SDP    0x0B
 
 #ifndef _WIN32
 struct msg_hdr {
@@ -65,10 +66,10 @@ struct msg_hdr {
 
 typedef struct msg_hdr msg_hdr_t;
 
-int msg_send_msg(socket_t* to, uint16_t client_id, uint8_t type,
+int msg_send_msg(transport_t* to, uint16_t client_id, uint8_t type,
 				 const char* data, int data_len);
-int msg_send_hello(socket_t* to, char* host, char* port, uint16_t req_id);
-int msg_recv_msg(socket_t* sock, socket_t* from,
+int msg_send_hello(transport_t* to, char* host, char* port, uint16_t req_id);
+int msg_recv_msg(transport_t* sock, socket_t* from,
 				 char* data, int data_len,
 				 uint16_t* client_id, uint8_t* type, uint16_t* length);
 

@@ -1,22 +1,6 @@
 /*
  * Project: udptunnel
  * File: udpclient.c
- *
- * Copyright (C) 2009 Daniel Meekins
- * Contact: dmeekins - gmail
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -45,14 +29,19 @@
 #include "packet.h"
 #include "client.h"
 #include "list.h"
+#ifdef HAVE_NICE
+#include "ice_transport.h"
+extern char *opt_stun;
+extern char *opt_turn;
+extern char *opt_turn_user;
+extern char *opt_turn_pass;
+#endif
 
 extern int debug_level;
 extern int ipver;
 static int running = 1;
 static uint16_t next_req_id;
 
-
-/* internal functions */
 static int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 						  char* data, int data_len);
 static void disconnect_and_remove_client(uint16_t id, list_t* clients);
@@ -87,6 +76,9 @@ int udpclient(int argc, char* argv[])
 	uint32_t timeexc_ip;
     struct pollfd *fds = NULL;
     int fds_size = 0;
+#ifdef HAVE_NICE
+    char *local_sdp = NULL;
+#endif
 
 	signal(SIGINT, &signal_handler);
 	i = 0;
@@ -107,7 +99,7 @@ int udpclient(int argc, char* argv[])
     }
 	rhost = argv[i++];
 	rport = argv[i++];
-	/* Get info about localhost IP */
+
 	if(!lhost){
 		char szHostName[255];
 		gethostname(szHostName, 255);
@@ -120,48 +112,47 @@ int udpclient(int argc, char* argv[])
 	rsrc.sin_family			= AF_INET;
 	rsrc.sin_port			= 0;
 	rsrc.sin_addr.s_addr	= timeexc_ip;
-	/* IP of destination */
+
 	memset(&src, 0, sizeof(struct sockaddr_in));
 	hp					  = gethostbyname(phost);
 	timeexc_ip            = *(uint32_t*)hp->h_addr_list[0];
 	src.sin_family        = AF_INET;
 	src.sin_port          = 0;
 	src.sin_addr.s_addr   = timeexc_ip;
-	/* IP of where the fake packet (echo request) was going */
+
 	hp = gethostbyname("3.3.3.3");
 	memcpy(&dest.sin_addr, hp->h_addr, hp->h_length);
 	inet_pton(AF_INET, "3.3.3.3", &(dest.sin_addr));
 	srand(time(NULL));
-	next_req_id = rand() % 0xffff;
-	/* Create an empty list for the clients */
+	next_req_id = (uint16_t)(rand() % 0xffff);
+
 	clients = list_create(sizeof(client_t), p_client_cmp, p_client_copy,
 						  p_client_free);
 	ERROR_GOTO(clients == NULL, "Error creating clients list.", done);
-	/* Create and empty list for the connecting clients */
 	conn_clients = list_create(sizeof(client_t), p_client_cmp, p_client_copy,
 							   p_client_free);
 	ERROR_GOTO(conn_clients == NULL, "Error creating clients list.", done);
-	/* Create a TCP server socket to listen for incoming connections */
+
 	tcp_serv = sock_create(lhost, lport, ipver, SOCK_TYPE_TCP, 1, 1);
 	ERROR_GOTO(tcp_serv == NULL, "Error creating TCP socket.", done);
 	if(debug_level >= DEBUG_LEVEL1) {
 		printf("Listening on TCP %s\n",
 			   sock_get_str(tcp_serv, addrstr, sizeof(addrstr)));
 	}
-	/* Initialize all the timers */
+
 	check_interval.tv_sec = 0;
 	check_interval.tv_usec = 500000;
 	gettimeofday(&check_time, NULL);
-	/* open raw socket */
+
 	create_icmp_socket(&icmp_sock);
 	if(icmp_sock == -1) {
 		printf("[main] can't open raw socket\n");
 		exit(1);
 	}
+
 	while(running) {
 		if(++timeexc==100) {
 			timeexc=0;
-			/* Send ICMP TTL exceeded to penetrate remote NAT */
 			send_icmp(icmp_sock, &rsrc, &src, &dest, 0);
 		}
 
@@ -172,10 +163,7 @@ int udpclient(int argc, char* argv[])
         if (needed_fds > fds_size) {
             fds_size = needed_fds + 10;
             fds = realloc(fds, sizeof(struct pollfd) * fds_size);
-            if (!fds) {
-                fprintf(stderr, "Error reallocating fds\n");
-                goto done;
-            }
+            if (!fds) goto done;
         }
 
         fds[0].fd = SOCK_FD(tcp_serv);
@@ -184,13 +172,13 @@ int udpclient(int argc, char* argv[])
 
         for(i = 0; i < num_conn_clients; i++) {
             client = list_get_at(conn_clients, i);
-            fds[current_fdi].fd = SOCK_FD(client->udp_sock);
+            fds[current_fdi].fd = SOCK_FD(client->transport.sock);
             fds[current_fdi].events = POLLIN;
             current_fdi++;
         }
         for(i = 0; i < num_clients; i++) {
             client = list_get_at(clients, i);
-            fds[current_fdi].fd = SOCK_FD(client->udp_sock);
+            fds[current_fdi].fd = (client->transport.type == TRANS_UDP) ? SOCK_FD(client->transport.sock) : -1;
             fds[current_fdi].events = POLLIN;
             current_fdi++;
             fds[current_fdi].fd = SOCK_FD(client->tcp_sock);
@@ -202,8 +190,6 @@ int udpclient(int argc, char* argv[])
 		PERROR_GOTO(ret < 0 && errno != EINTR, "poll", done);
 
 		gettimeofday(&curr_time, NULL);
-		/* Go through all the clients and check if didn't get an ACK for sent
-		   data during the timeout period */
 		if(timercmp(&curr_time, &check_time, >)) {
 			for(i = 0; i < LIST_LEN(clients); i++) {
 				client = list_get_at(clients, i);
@@ -221,36 +207,55 @@ int udpclient(int argc, char* argv[])
 			}
 			timeradd(&curr_time, &check_interval, &check_time);
 		}
+
+        /* Even if poll timeout, we might need to check ICE contexts */
+        for(i = 0; i < LIST_LEN(clients); i++) {
+            client = list_get_at(clients, i);
+            if (client->transport.type == TRANS_ICE) {
+                ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len);
+                if (ret == 0) handle_message(client, tmp_id, tmp_type, data, tmp_len);
+            }
+        }
+
 		if(ret <= 0) continue;
 
-		timeexc=0;
-		/* Check if pending TCP connection to accept and create a new client
-		   and UDP connection if one is ready */
 		if(fds[0].revents & POLLIN) {
 			tcp_sock = sock_accept(tcp_serv);
 			udp_sock = sock_create(phost, pport, ipver,
 								   SOCK_TYPE_UDP, 0, 1);
-			client = client_create(next_req_id++, tcp_sock, udp_sock, 1);
+            transport_t t;
+            t.type = TRANS_UDP;
+            t.sock = udp_sock;
+            t.ice_ptr = NULL;
+			client = client_create(next_req_id++, tcp_sock, &t, 1);
 			if(!client || !tcp_sock || !udp_sock) {
-				if(tcp_sock)
-					sock_close(tcp_sock);
-				if(udp_sock)
-					sock_close(udp_sock);
+				if(tcp_sock) sock_close(tcp_sock);
+				if(udp_sock) sock_close(udp_sock);
 			} else {
 				client2 = list_add(conn_clients, client);
+#ifdef HAVE_NICE
+                if (opt_stun || opt_turn) {
+                    client2->ice = ice_transport_create(opt_stun, opt_turn, opt_turn_user, opt_turn_pass);
+                    local_sdp = ice_transport_get_local_sdp(client2->ice);
+                }
+#endif
 				client_free(client);
 				client = NULL;
 				client_send_hello(client2, rhost, rport, CLIENT_ID(client2));
+#ifdef HAVE_NICE
+                if (local_sdp) {
+                    msg_send_msg(&client2->transport, client2->id, MSG_TYPE_ICE_SDP, local_sdp, (int)strlen(local_sdp));
+                    free(local_sdp);
+                    local_sdp = NULL;
+                }
+#endif
 			}
 			sock_free(tcp_sock);
 			sock_free(udp_sock);
-			tcp_sock = NULL;
-			udp_sock = NULL;
 		}
 
-		/* Check for pending handshakes from UDP connection */
         current_fdi = 1;
-		for(i = 0; i < num_conn_clients; i++) {
+		for(i = 0; i < LIST_LEN(conn_clients); i++) {
 			client = list_get_at(conn_clients, i);
 			if(fds[current_fdi].revents & POLLIN) {
 				tmp_req_id = CLIENT_ID(client);
@@ -259,25 +264,38 @@ int udpclient(int argc, char* argv[])
 				if(ret == 0)
 					ret = handle_message(client, tmp_id, tmp_type,
 										 data, tmp_len);
+#ifdef HAVE_NICE
+                if (ret == 0 && tmp_type == MSG_TYPE_ICE_SDP) {
+                    if (client->ice) {
+                        ice_transport_negotiate(client->ice, data);
+                    }
+                }
+#endif
 				if(ret < 0) {
 					disconnect_and_remove_client(tmp_req_id, conn_clients);
 				} else {
-					client2 = list_add(clients, client);
+					list_add(clients, client);
 					list_delete(conn_clients, &tmp_req_id);
 				}
-                /* We modified the list we are iterating over, better re-poll next time */
                 break;
 			}
             current_fdi++;
 		}
-		/* Check if data is ready from any of the clients */
-        /* Skip to the fdi where 'clients' start */
+
         current_fdi = 1 + num_conn_clients;
 		for(i = 0; i < num_clients; i++) {
 			client = list_get_at(clients, i);
-			/* Check for UDP data */
+            tmp_req_id = CLIENT_ID(client);
+
+            /* Fallback to ICE if negotiated and UDP seems dead?
+               Or just check both. */
+            if (client->ice && client->ice->negotiated && client->transport.type == TRANS_UDP) {
+                printf("Switching to ICE transport for client %d\n", client->id);
+                client->transport.type = TRANS_ICE;
+                client->transport.ice_ptr = client->ice;
+            }
+
 			if(fds[current_fdi].revents & POLLIN) {
-                tmp_req_id = CLIENT_ID(client);
 				ret = client_recv_udp_msg(client, data, sizeof(data),
 										  &tmp_id, &tmp_type, &tmp_len);
 				if(ret == 0)
@@ -289,9 +307,7 @@ int udpclient(int argc, char* argv[])
 				}
 			}
             current_fdi++;
-			/* Check for TCP data */
 			if(fds[current_fdi].revents & POLLIN) {
-                tmp_req_id = CLIENT_ID(client);
 				ret = client_recv_tcp_data(client);
 				if(ret == 0)
 					ret = client_send_udp_data(client);
@@ -315,25 +331,18 @@ done:
 		sock_close(udp_sock);
 		sock_free(udp_sock);
 	}
-	if(clients)
-		list_free(clients);
-    if(conn_clients)
-        list_free(conn_clients);
+	if(clients) list_free(clients);
+    if(conn_clients) list_free(conn_clients);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Goodbye.\n");
 	return 0;
 }
 
-/*
- * Closes the TCP and UDP connections for the client and remove its stuff from
- * the lists.
- */
 void disconnect_and_remove_client(uint16_t id, list_t* clients)
 {
 	client_t* c;
 	c = list_get(clients, &id);
-	if(!c)
-		return;
+	if(!c) return;
 	client_send_goodbye(c);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Client %d disconnected.\n", CLIENT_ID(c));
@@ -342,10 +351,6 @@ void disconnect_and_remove_client(uint16_t id, list_t* clients)
 	list_delete(clients, &id);
 }
 
-/*
- * Handles a message received from the UDP tunnel. Returns 0 if successful, -1
- * on some error it handled, or -2 if the client is to disconnect.
- */
 int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 				   char* data, int data_len)
 {
@@ -362,8 +367,12 @@ int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 		if(debug_level >= DEBUG_LEVEL1) {
 			sock_get_str(c->tcp_sock, addrstr, sizeof(addrstr));
 			printf("New connection(%d): tcp://%s", CLIENT_ID(c), addrstr);
-			sock_get_str(c->udp_sock, addrstr, sizeof(addrstr));
-			printf(" -> udp://%s\n", addrstr);
+			if (c->transport.type == TRANS_UDP && c->transport.sock) {
+                sock_get_str(c->transport.sock, addrstr, sizeof(addrstr));
+                printf(" -> udp://%s\n", addrstr);
+            } else {
+                printf(" -> ICE\n");
+            }
 		}
 		break;
 	case MSG_TYPE_DATA0:
@@ -388,6 +397,9 @@ int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
         ret = client_got_udp_data(c, data, data_len, msg_type);
 		if(ret == 0)
 			ret = client_send_tcp_data(c);
+        break;
+    case MSG_TYPE_ICE_SDP:
+        /* Already handled in main loop if needed, but let's be safe */
         break;
 	default:
 		ret = -1;

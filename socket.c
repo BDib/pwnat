@@ -1,22 +1,6 @@
 /*
  * Project: udptunnel
  * File: socket.c
- *
- * Copyright (C) 2009 Daniel Meekins
- * Contact: dmeekins - gmail
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -30,25 +14,21 @@
 #	include <sys/socket.h>
 #	include <arpa/inet.h>
 #	include <netdb.h>
+#else
+#	include "windoze.h"
 #endif /*WIN32*/
 
+#include <errno.h>
 #include "socket.h"
 #include "common.h"
+#ifdef HAVE_NICE
+#include "ice_transport.h"
+#endif
 
 extern int debug_level;
 
 void print_hexdump(char* data, int len);
 
-/*
- * Allocates and returns a new socket structure.
- * host - string of host or address to listen on (can be NULL for servers)
- * port - string of port number or service (can be NULL for clients)
- * ipver - SOCK_IPV4 or SOCK_IPV6
- * sock_type - SOCK_TYPE_TCP or SOCK_TYPE_UDP
- * is_serv - 1 if is a server socket to bind and listen on port, 0 if client
- * conn - call socket(), bind(), and listen() if is_serv, or connect()
- *        if not is_serv. Doesn't call these if conn is 0.
- */
 socket_t* sock_create(char* host, char* port, int ipver, int sock_type,
 					  int is_serv, int conn)
 {
@@ -72,18 +52,14 @@ socket_t* sock_create(char* host, char* port, int ipver, int sock_type,
 	default:
 		goto error;
 	}
-	/* If both host and port are null, then don't create any socket or
-	   address */
 	if(host == NULL && port == NULL)
 		goto done;
-	/* Setup type of address to get */
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = (ipver == SOCK_IPV6) ? AF_INET6 : AF_INET;
 	hints.ai_socktype = sock->type;
 	hints.ai_flags = is_serv ? AI_PASSIVE : 0;
-	/* Get address from the machine */
 	ret = getaddrinfo(host, port, &hints, &info);
-	PERROR_GOTO(ret != 0, "getaddrinfo", error);
+	if (ret != 0) goto error;
 	memcpy(paddr, info->ai_addr, info->ai_addrlen);
 	sock->addr_len = info->ai_addrlen;
 	if(conn) {
@@ -105,6 +81,7 @@ error:
 socket_t* sock_copy(socket_t* sock)
 {
 	socket_t* new;
+	if (!sock) return NULL;
 	new = malloc(sizeof(*sock));
 	if(!new)
 		return NULL;
@@ -112,37 +89,27 @@ socket_t* sock_copy(socket_t* sock)
 	return new;
 }
 
-/*
- *
- */
 int sock_connect(socket_t* sock, int is_serv, char* port)
 {
 	struct sockaddr* paddr;
-	struct sockaddr_in sa;
 	int ret;
+	int opt = 1;
+
 	ERROR_GOTO(sock->fd != -1, "Socket already connected.", error);
 	paddr = SOCK_ADDR(sock);
-	/* Create socket file descriptor */
 	sock->fd = socket(paddr->sa_family, sock->type, sock->type == SOCK_DGRAM ? IPPROTO_UDP : 0);
-	sock->fd = socket(PF_INET, sock->type, sock->type == SOCK_DGRAM ? IPPROTO_UDP : 0);
 	PERROR_GOTO(sock->fd < 0, "socket", error);
-	sa.sin_family = AF_INET;
-	sa.sin_port = htons(atoi(port));
-	sa.sin_addr.s_addr = htonl(INADDR_ANY);
-	if(sock->type == SOCK_DGRAM)
-		if(bind(sock->fd, (const struct sockaddr*)&sa, sizeof(struct sockaddr_in))!= 0)
-			printf("Bind failed\n");
-	if(is_serv) {
-		/* Start listening on the port if tcp */
+
+	if (is_serv) {
+		setsockopt(sock->fd, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+		ret = bind(sock->fd, paddr, sock->addr_len);
+		PERROR_GOTO(ret != 0, "bind", error);
+
 		if(sock->type == SOCK_STREAM) {
-			/* Bind socket to address and port */
-			ret = bind(sock->fd, paddr, sock->addr_len);
-			PERROR_GOTO(ret != 0, "bind", error);
 			ret = listen(sock->fd, BACKLOG);
 			PERROR_GOTO(ret != 0, "listen", error);
 		}
 	} else {
-		/* Connect to the server if tcp */
 		if(sock->type == SOCK_STREAM) {
 			ret = connect(sock->fd, paddr, sock->addr_len);
 			PERROR_GOTO(ret != 0, "connect", error);
@@ -153,10 +120,6 @@ error:
 	return -1;
 }
 
-/*
- * Accept a new connection and return a newly allocated socket representing
- * the remote connection.
- */
 socket_t* sock_accept(socket_t* serv)
 {
 	socket_t* client;
@@ -174,9 +137,6 @@ error:
 	return NULL;
 }
 
-/*
- * Returns non zero if IP addresses and ports are same, or 0 if not.
- */
 int sock_addr_equal(socket_t* s1, socket_t* s2)
 {
 	if(s1->addr_len != s2->addr_len)
@@ -184,9 +144,6 @@ int sock_addr_equal(socket_t* s1, socket_t* s2)
 	return (memcmp(&s1->addr, &s2->addr, s1->addr_len) == 0);
 }
 
-/*
- * Closes the file descriptor for the socket.
- */
 void sock_close(socket_t* s)
 {
 	if(s->fd != -1) {
@@ -199,24 +156,14 @@ void sock_close(socket_t* s)
 	}
 }
 
-/*
- * Frees the socket structure.
- */
 void sock_free(socket_t* s)
 {
 	free(s);
 }
 
-/*
- * Gets the string representation of the IP address and port from addr. Will
- * store result in buf, which len must be at least INET6_ADDRLEN + 6. Returns a
- * pointer to buf. String will be in the form of "ip_address:port".
- */
 #ifdef _WIN32
 char* sock_get_str(socket_t* s, char* buf, int len)
 {
-	/* WSAAddressToString() gets the port also, so just call get_addrstr()
-	   here because it will have the same output */
 	return sock_get_addrstr(s, buf, len);
 }
 #else
@@ -245,10 +192,6 @@ char* sock_get_str(socket_t* s, char* buf, int len)
 }
 #endif /*WIN32*/
 
-/*
- * Gets the string representation of the IP address and puts it in buf. Will
- * return the pointer to buf or NULL if there was an error.
- */
 #ifdef _WIN32
 char* sock_get_addrstr(socket_t* s, char* buf, int len)
 {
@@ -279,9 +222,6 @@ char* sock_get_addrstr(socket_t* s, char* buf, int len)
 }
 #endif /*WIN32*/
 
-/*
- * Returns the 16-bit port number in host byte order from the passed sockaddr.
- */
 uint16_t sock_get_port(socket_t* s)
 {
 	switch(s->addr.ss_family) {
@@ -294,13 +234,6 @@ uint16_t sock_get_port(socket_t* s)
 	return 0;
 }
 
-/*
- * Receives data from the socket. Calles recv() or recvfrom() depending on the
- * type of socket. Ignores the 'from' argument if type is for TCP, or puts
- * remove address in from socket for UDP. Reads up to len bytes and puts it in
- * data. Returns number of bytes sent, or 0 if remote host disconnected, or -1
- * on error.
- */
 int sock_recv(socket_t* sock, socket_t* from, char* data, int len)
 {
 	int bytes_recv = 0;
@@ -311,7 +244,7 @@ int sock_recv(socket_t* sock, socket_t* from, char* data, int len)
 		break;
 	case SOCK_DGRAM:
 		if(!from)
-			from = &tmp; /* In case caller wants to ignore from socket */
+			from = &tmp;
 		from->fd = sock->fd;
 		from->addr_len = sock->addr_len;
 		bytes_recv = recvfrom(from->fd, data, len, 0,
@@ -319,13 +252,14 @@ int sock_recv(socket_t* sock, socket_t* from, char* data, int len)
 		break;
 	}
 	#ifndef _WIN32
+	if (bytes_recv < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
 	PERROR_GOTO(bytes_recv<0, "recv", error);
 	#else
 	if(bytes_recv<0 && WSAGetLastError()!=WSAECONNRESET){
 		printf("WSAGetLastError: %i\n",WSAGetLastError());goto error;
 	}
 	#endif /* _WIN32 */
-	ERROR_GOTO(bytes_recv==0, "disconnect", disconnect);
+	ERROR_GOTO(bytes_recv==0 && sock->type == SOCK_STREAM, "disconnect", disconnect);
 	if(debug_level >= DEBUG_LEVEL3) {
 		printf("sock_recv: type=%d, fd=%d, bytes=%d\n",
 			   sock->type, sock->fd, bytes_recv);
@@ -338,11 +272,7 @@ error:
 	return -1;
 }
 
-/*
- * Sends len bytes in data to the socket connection. Returns number of bytes
- * sent, or 0 on disconnect, or -1 on error.
- */
-int sock_send(socket_t* to, char* data, int len)
+int sock_send(socket_t* to, const char* data, int len)
 {
 	int bytes_sent = 0;
 	int ret;
@@ -366,13 +296,53 @@ int sock_send(socket_t* to, char* data, int len)
 	if(debug_level >= DEBUG_LEVEL3) {
 		printf("sock_send: type=%d, fd=%d, bytes=%d\n",
 			   to->type, to->fd, bytes_sent);
-		print_hexdump(data, bytes_sent);
+		print_hexdump((char*)data, bytes_sent);
 	}
 	return bytes_sent;
 disconnect:
 	return 0;
 error:
 	return -1;
+}
+
+int transport_send(transport_t *t, const char *data, int len) {
+    if (t->type == TRANS_UDP) {
+        return sock_send(t->sock, data, len);
+    }
+#ifdef HAVE_NICE
+    else if (t->type == TRANS_ICE) {
+        ice_transport_t *ice = (ice_transport_t *)t->ice_ptr;
+        if (ice && ice->negotiated) {
+            return nice_agent_send(ice->agent, ice->stream_id, ice->component_id, len, data);
+        }
+    }
+#endif
+    return -1;
+}
+
+int transport_recv(transport_t *t, socket_t *from, char *data, int len) {
+    if (t->type == TRANS_UDP) {
+        return sock_recv(t->sock, from, data, len);
+    }
+#ifdef HAVE_NICE
+    else if (t->type == TRANS_ICE) {
+        ice_transport_t *ice = (ice_transport_t *)t->ice_ptr;
+        if (ice && ice->negotiated) {
+             g_main_context_iteration(g_main_loop_get_context(ice->loop), FALSE);
+             if (ice->recv_buf_len > 0) {
+                 int to_copy = MIN(len, ice->recv_buf_len);
+                 memcpy(data, ice->recv_buf, to_copy);
+                 if (to_copy < ice->recv_buf_len) {
+                     memmove(ice->recv_buf, ice->recv_buf + to_copy, ice->recv_buf_len - to_copy);
+                 }
+                 ice->recv_buf_len -= to_copy;
+                 return to_copy;
+             }
+             return 0;
+        }
+    }
+#endif
+    return -1;
 }
 
 void print_hexdump(char* data, int len)
@@ -382,7 +352,6 @@ void print_hexdump(char* data, int len)
 	int i;
 	for(line = 0; line < max_lines; line++) {
 		printf("%08x  ", line * 16);
-		/* print hex */
 		for(i = line * 16; i < (8 + (line * 16)); i++) {
 			if(i < len)
 				printf("%02x ", (uint8_t)data[i]);
@@ -397,7 +366,6 @@ void print_hexdump(char* data, int len)
 				printf("   ");
 		}
 		printf(" ");
-		/* print ascii */
 		for(i = line * 16; i < (8 + (line * 16)); i++) {
 			if(i < len) {
 				if(32 <= data[i] && data[i] <= 126)

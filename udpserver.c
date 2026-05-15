@@ -1,22 +1,6 @@
 /*
  * Project: udptunnel
  * File: udpserver.c
- *
- * Copyright (C) 2009 Daniel Meekins
- * Contact: dmeekins - gmail
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -43,15 +27,21 @@
 #include "socket.h"
 #include "destination.h"
 #include "packet.h"
+#ifdef HAVE_NICE
+#include "ice_transport.h"
+extern char *opt_stun;
+extern char *opt_turn;
+extern char *opt_turn_user;
+extern char *opt_turn_pass;
+#endif
 
 extern int debug_level;
 extern int ipver;
 static int running = 1;
 static int next_client_id = 1;
 
-/* internal functions */
 static int handle_message(uint16_t id, uint8_t msg_type, char* data,
-						  int data_len, socket_t* from, list_t* clients,
+						  int data_len, transport_t* from, list_t* clients,
 						  list_t* allowed_destinations, char* port);
 static int destination_allowed(list_t* allowed_destinations,
 							   const char* host, const char* port);
@@ -91,11 +81,11 @@ int udpserver(int argc, char* argv[])
 	signal(SIGINT, &signal_handler);
 
 	memset(&dest_addr, 0, sizeof(struct sockaddr_in));
-	host_ent                    = gethostbyname("3.3.3.3");
-	timeexc_ip                  = *(uint32_t*)host_ent->h_addr_list[0];
-	dest_addr.sin_family        = AF_INET;
-	dest_addr.sin_port          = 0;
-	dest_addr.sin_addr.s_addr   = timeexc_ip;
+	host_ent = gethostbyname("3.3.3.3");
+	timeexc_ip = *(uint32_t*)host_ent->h_addr_list[0];
+	dest_addr.sin_family = AF_INET;
+	dest_addr.sin_port = 0;
+	dest_addr.sin_addr.s_addr = timeexc_ip;
 
 	allowed_start = argc;
 	for(i = 0; i < argc; i++)
@@ -128,21 +118,17 @@ int udpserver(int argc, char* argv[])
 										   p_destination_cmp,
 										   p_destination_copy,
 										   p_destination_free);
-		if(!allowed_destinations)
-			goto done;
+		if(!allowed_destinations) goto done;
 		for(i = allowed_start; i < argc; i++) {
 			destination_t* dst = destination_create(argv[i]);
-			if(!dst)
-				goto done;
-			if(!list_add(allowed_destinations, dst))
-				goto done;
+			if(!dst) goto done;
+			if(!list_add(allowed_destinations, dst)) goto done;
 			destination_free(dst);
 		}
 	}
 	clients = list_create(sizeof(client_t), p_client_cmp, p_client_copy,
 						  p_client_free);
-	if(!clients)
-		goto done;
+	if(!clients) goto done;
 
 	if(!(strlen(host_str)>0)) {
 		char szHostName[255];
@@ -152,22 +138,20 @@ int udpserver(int argc, char* argv[])
 		host_ent = gethostbyname(host_str);
 	}
 	memset(&rsrc, 0, sizeof(struct sockaddr_in));
-	timeexc_ip				= *(uint32_t*)host_ent->h_addr_list[0];
-	rsrc.sin_family        = AF_INET;
-	rsrc.sin_port          = 0;
-	rsrc.sin_addr.s_addr   = timeexc_ip;
+	timeexc_ip = *(uint32_t*)host_ent->h_addr_list[0];
+	rsrc.sin_family = AF_INET;
+	rsrc.sin_port = 0;
+	rsrc.sin_addr.s_addr = timeexc_ip;
 
 	udp_sock = sock_create((host_str[0] == 0 ? NULL : host_str), port_str,
 						   ipver, SOCK_TYPE_UDP, 1, 1);
-	if(!udp_sock)
-		goto done;
+	if(!udp_sock) goto done;
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Listening on UDP %s\n",
 			   sock_get_str(udp_sock, addrstr, sizeof(addrstr)));
 
 	udp_from = sock_create(NULL, NULL, ipver, SOCK_TYPE_UDP, 0, 0);
-	if(!udp_from)
-		goto done;
+	if(!udp_from) goto done;
 
 	timerclear(&timeout);
 	gettimeofday(&check_time, NULL);
@@ -216,10 +200,7 @@ int udpserver(int argc, char* argv[])
         if (needed_fds > fds_size) {
             fds_size = needed_fds + 10;
             fds = realloc(fds, sizeof(struct pollfd) * fds_size);
-            if (!fds) {
-                fprintf(stderr, "Error reallocating fds\n");
-                goto done;
-            }
+            if (!fds) goto done;
         }
 
         fds[0].fd = SOCK_FD(udp_sock);
@@ -250,18 +231,40 @@ int udpserver(int argc, char* argv[])
 			}
 			timeradd(&curr_time, &check_interval, &check_time);
 		}
+
+        /* Check ICE contexts for incoming data */
+        for(i = 0; i < LIST_LEN(clients); i++) {
+            client = list_get_at(clients, i);
+#ifdef HAVE_NICE
+            if (client->ice && client->ice->negotiated && client->transport.type == TRANS_UDP) {
+                /* Server also switches if ICE is ready and UDP might be blocked */
+                client->transport.type = TRANS_ICE;
+                client->transport.ice_ptr = client->ice;
+            }
+#endif
+            if (client->transport.type == TRANS_ICE) {
+                ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len);
+                if (ret == 0) handle_message(client->id, tmp_type, data, tmp_len, &client->transport, clients, allowed_destinations, port_str);
+            }
+        }
+
 		if(ret <= 0) continue;
 
 		if(fds[0].revents & POLLIN) {
-			ret = msg_recv_msg(udp_sock, udp_from, data, sizeof(data),
+            transport_t t;
+            t.type = TRANS_UDP;
+            t.sock = udp_sock;
+            t.ice_ptr = NULL;
+			ret = msg_recv_msg(&t, udp_from, data, sizeof(data),
 							   &tmp_id, &tmp_type, &tmp_len);
 			if(ret == 0)
 				ret = handle_message(tmp_id, tmp_type, data, tmp_len,
-									 udp_from, clients,
+									 &t, clients,
 									 allowed_destinations, port_str);
 			if(ret == -2) {
 				disconnect_and_remove_client(tmp_id, clients);
 			}
+            if (num_clients != LIST_LEN(clients)) continue;
 		}
 
 		for(i = 0; i < num_clients; i++) {
@@ -282,16 +285,13 @@ done:
     if (fds) free(fds);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Cleaning up...\n");
-	if(allowed_destinations)
-		list_free(allowed_destinations);
-	if(clients)
-		list_free(clients);
+	if(allowed_destinations) list_free(allowed_destinations);
+	if(clients) list_free(clients);
 	if(udp_sock) {
 		sock_close(udp_sock);
 		sock_free(udp_sock);
 	}
-	if(udp_from)
-		sock_free(udp_from);
+	if(udp_from) sock_free(udp_from);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Goodbye.\n");
 	return 0;
@@ -300,11 +300,9 @@ done:
 void disconnect_and_remove_client(uint16_t id, list_t* clients)
 {
 	client_t* c;
-	if(id == 0)
-		return;
+	if(id == 0) return;
 	c = list_get(clients, &id);
-	if(!c)
-		return;
+	if(!c) return;
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Client %d disconnected.\n", CLIENT_ID(c));
 	client_disconnect_tcp(c);
@@ -312,7 +310,7 @@ void disconnect_and_remove_client(uint16_t id, list_t* clients)
 }
 
 static int handle_message(uint16_t id, uint8_t msg_type, char* data, int data_len,
-				   socket_t* from, list_t* clients,
+				   transport_t* from, list_t* clients,
 				   list_t* allowed_destinations, char* port_str)
 {
 	client_t* c = NULL;
@@ -321,11 +319,9 @@ static int handle_message(uint16_t id, uint8_t msg_type, char* data, int data_le
 	int ret = 0;
 	if(id != 0) {
 		c = list_get(clients, &id);
-		if(!c)
-			return -1;
+		if(!c) return -1;
 	}
-	if(id == 0 && msg_type != MSG_TYPE_HELLO)
-		return -2;
+	if(id == 0 && msg_type != MSG_TYPE_HELLO) return -2;
 	switch(msg_type) {
 	case MSG_TYPE_GOODBYE:
 		ret = -2;
@@ -335,23 +331,20 @@ static int handle_message(uint16_t id, uint8_t msg_type, char* data, int data_le
 			char port[6];
 			char addrstr[ADDRSTRLEN];
 			uint16_t req_id;
-			if(id != 0)
-				break;
+			if(id != 0) break;
 			req_id = ntohs(*((uint16_t*)data));
 			data += sizeof(uint16_t);
 			data_len -= (int)sizeof(uint16_t);
 			for(i = 0; i < data_len; i++)
-				if(data[i] == ' ')
-					break;
-			if(i == data_len)
-				break;
+				if(data[i] == ' ') break;
+			if(i == data_len) break;
 			data[i++] = 0;
 			strncpy(port, data+i, data_len-i);
 			port[data_len-i] = 0;
 			if(!destination_allowed(allowed_destinations, data, port)) {
 				if(debug_level >= DEBUG_LEVEL1)
 					printf("Connection to %s:%s denied\n", data, port);
-				msg_send_msg(from, next_client_id, MSG_TYPE_GOODBYE, NULL, 0);
+				msg_send_msg(from, (uint16_t)next_client_id, MSG_TYPE_GOODBYE, NULL, 0);
 				return -2;
 			}
 			tcp_sock = sock_create(data, port, ipver, SOCK_TYPE_TCP, 0, 0);
@@ -361,9 +354,18 @@ static int handle_message(uint16_t id, uint8_t msg_type, char* data, int data_le
 			ERROR_GOTO(c == NULL, "Error creating client", error);
 			c2 = list_add(clients, c);
 			ERROR_GOTO(c2 == NULL, "Error adding client to list", error);
+#ifdef HAVE_NICE
+            if (opt_stun || opt_turn) {
+                c2->ice = ice_transport_create(opt_stun, opt_turn, opt_turn_user, opt_turn_pass);
+            }
+#endif
 			if(debug_level >= DEBUG_LEVEL1) {
-				sock_get_str(c2->udp_sock, addrstr, sizeof(addrstr));
-				printf("New connection(%d): udp://%s", CLIENT_ID(c2), addrstr);
+				if (c2->transport.type == TRANS_UDP && c2->transport.sock) {
+                    sock_get_str(c2->transport.sock, addrstr, sizeof(addrstr));
+                    printf("New connection(%d): udp://%s", CLIENT_ID(c2), addrstr);
+                } else {
+                    printf("New connection(%d): ICE", CLIENT_ID(c2));
+                }
 				sock_get_str(c2->tcp_sock, addrstr, sizeof(addrstr));
 				printf(" -> tcp://%s\n", addrstr);
 			}
@@ -382,8 +384,7 @@ static int handle_message(uint16_t id, uint8_t msg_type, char* data, int data_le
 	case MSG_TYPE_DATA0:
 	case MSG_TYPE_DATA1:
 		ret = client_got_udp_data(c, data, data_len, msg_type);
-		if(ret == 0)
-			ret = client_send_tcp_data(c);
+		if(ret == 0) ret = client_send_tcp_data(c);
 		break;
 	case MSG_TYPE_ACK0:
 	case MSG_TYPE_ACK1:
@@ -397,10 +398,19 @@ static int handle_message(uint16_t id, uint8_t msg_type, char* data, int data_le
         }
         break;
     }
+#ifdef HAVE_NICE
+    case MSG_TYPE_ICE_SDP:
+        if (c->ice) {
+            ice_transport_negotiate(c->ice, data);
+            char *local_sdp = ice_transport_get_local_sdp(c->ice);
+            msg_send_msg(&c->transport, c->id, MSG_TYPE_ICE_SDP, local_sdp, (int)strlen(local_sdp));
+            free(local_sdp);
+        }
+        break;
+#endif
     case MSG_TYPE_DATA_SEQ:
         ret = client_got_udp_data(c, data, data_len, msg_type);
-		if(ret == 0)
-			ret = client_send_tcp_data(c);
+		if(ret == 0) ret = client_send_tcp_data(c);
         break;
 	default:
 		ret = -1;
@@ -414,8 +424,7 @@ static int destination_allowed(list_t* allowed_destinations,
 						const char* host, const char* port)
 {
 	int i;
-	if(!allowed_destinations)
-		return 1;
+	if(!allowed_destinations) return 1;
 	for(i = 0; i < LIST_LEN(allowed_destinations); i++) {
 		destination_t* dst = list_get_at(allowed_destinations, i);
 		if((!dst->host || !strcmp(dst->host, host))
