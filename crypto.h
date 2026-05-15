@@ -9,18 +9,11 @@
 
 static inline void crypto_xor(char* data, int len, const char* key) {
     if (!key || !*key) return;
-    static size_t cached_key_len = 0;
-    static const char* last_key = NULL;
-
-    if (key != last_key) {
-        cached_key_len = strlen(key);
-        last_key = key;
-    }
-
-    if (cached_key_len == 0) return;
+    size_t key_len = strlen(key);
+    if (key_len == 0) return;
 
     for (int i = 0; i < len; i++) {
-        data[i] ^= key[i % cached_key_len];
+        data[i] ^= key[i % key_len];
     }
 }
 

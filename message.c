@@ -41,11 +41,11 @@ extern char* opt_key;
  * Returns 0 for success, -1 on error, or -2 to close the connection.
  */
 int msg_send_msg(socket_t* to, uint16_t client_id, uint8_t type,
-				 char* data, int data_len)
+				 const char* data, int data_len)
 {
-	char buf[MSG_MAX_LEN + sizeof(msg_hdr_t)];
+	char buf[MAX_PAYLOAD_LEN + sizeof(msg_hdr_t)];
 	int len; /* length for entire packet */
-	if(data_len > MSG_MAX_LEN)
+	if(data_len > MAX_PAYLOAD_LEN)
 		return -1;
 	switch(type) {
 	case MSG_TYPE_HELLO:
@@ -54,9 +54,11 @@ int msg_send_msg(socket_t* to, uint16_t client_id, uint8_t type,
 	case MSG_TYPE_DATA1:
     case MSG_TYPE_DATA_SEQ:
     case MSG_TYPE_ACK_SEQ:
-		memcpy(buf+sizeof(msg_hdr_t), data, data_len);
-        if (opt_key) {
-            crypto_xor(buf + sizeof(msg_hdr_t), data_len, opt_key);
+		if (data && data_len > 0) {
+            memcpy(buf+sizeof(msg_hdr_t), data, data_len);
+            if (opt_key) {
+                crypto_xor(buf + sizeof(msg_hdr_t), data_len, opt_key);
+            }
         }
 		break;
 	case MSG_TYPE_GOODBYE:
@@ -68,7 +70,7 @@ int msg_send_msg(socket_t* to, uint16_t client_id, uint8_t type,
 	default:
 		return -1;
 	}
-	len = data_len + sizeof(msg_hdr_t);
+	len = data_len + (int)sizeof(msg_hdr_t);
 	msg_init_header((msg_hdr_t*)buf, client_id, type, data_len);
 	len = sock_send(to, buf, len);
 	if(len < 0)
@@ -89,8 +91,8 @@ int msg_send_hello(socket_t* to, char* host, char* port, uint16_t req_id)
 	char* data;
 	int str_len;
 	int len;
-	str_len = strlen(host) + strlen(port) + 2;
-	len = str_len + sizeof(req_id);
+	str_len = (int)strlen(host) + (int)strlen(port) + 2;
+	len = str_len + (int)sizeof(req_id);
 	data = malloc(len);
 	if(!data)
 		return -1;
@@ -119,7 +121,7 @@ int msg_send_hello(socket_t* to, char* host, char* port, uint16_t req_id)
 int msg_recv_msg(socket_t* sock, socket_t* from, char* data, int data_len,
 				 uint16_t* client_id, uint8_t* type, uint16_t* length)
 {
-	char buf[MSG_MAX_LEN + sizeof(msg_hdr_t)];
+	char buf[MAX_PAYLOAD_LEN + sizeof(msg_hdr_t)];
 	msg_hdr_t* hdr_ptr;
 	char* msg_ptr;
 	int ret;
@@ -135,10 +137,12 @@ int msg_recv_msg(socket_t* sock, socket_t* from, char* data, int data_len,
 	*length = msg_get_length(hdr_ptr);
 	if(ret-(int)sizeof(msg_hdr_t) != *length)
 		return -1;
-	*length = MIN(data_len, *length);
-	memcpy(data, msg_ptr, *length);
+
+    int actual_len = MIN(data_len, *length);
+	memcpy(data, msg_ptr, actual_len);
     if (opt_key) {
-        crypto_xor(data, *length, opt_key);
+        crypto_xor(data, actual_len, opt_key);
     }
+    *length = (uint16_t)actual_len;
 	return 0;
 }

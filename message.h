@@ -30,7 +30,8 @@
 #include "common.h"
 #include "socket.h"
 
-#define MSG_MAX_LEN 1024 /* max bytes to send in body of message (16 bits) */
+#define MSG_MAX_LEN 1024 /* max bytes of TCP data in one message */
+#define MAX_PAYLOAD_LEN (MSG_MAX_LEN + 8) /* extra space for sequence numbers, etc */
 #define KEEP_ALIVE_SECS 60
 #define KEEP_ALIVE_TIMEOUT_SECS (7*60+1) /* has 7 tries to send a keep alive */
 
@@ -65,7 +66,7 @@ struct msg_hdr {
 typedef struct msg_hdr msg_hdr_t;
 
 int msg_send_msg(socket_t* to, uint16_t client_id, uint8_t type,
-				 char* data, int data_len);
+				 const char* data, int data_len);
 int msg_send_hello(socket_t* to, char* host, char* port, uint16_t req_id);
 int msg_recv_msg(socket_t* sock, socket_t* from,
 				 char* data, int data_len,

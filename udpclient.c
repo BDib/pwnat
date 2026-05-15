@@ -29,12 +29,13 @@
 #include <sys/time.h>
 
 #ifndef _WIN32
-#	include <sys/select.h>
+#	include <poll.h>
 #	include <sys/socket.h>
 #	include <arpa/inet.h>
 #	include <netdb.h>
 #else
 #	include "windoze.h"
+#   define poll WSAPoll
 #endif
 
 #include "common.h"
@@ -53,8 +54,7 @@ static uint16_t next_req_id;
 /* internal functions */
 static int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 						  char* data, int data_len);
-static void disconnect_and_remove_client(uint16_t id, list_t* clients,
-		fd_set* fds);
+static void disconnect_and_remove_client(uint16_t id, list_t* clients);
 static void signal_handler(int sig);
 
 int udpclient(int argc, char* argv[])
@@ -67,20 +67,16 @@ int udpclient(int argc, char* argv[])
 	socket_t* tcp_serv = NULL;
 	socket_t* tcp_sock = NULL;
 	socket_t* udp_sock = NULL;
-	char data[MSG_MAX_LEN];
+	char data[MAX_PAYLOAD_LEN];
 	char addrstr[ADDRSTRLEN];
 	char pport_s[6];
 	struct timeval curr_time;
 	struct timeval check_time;
 	struct timeval check_interval;
-	struct timeval timeout;
-	fd_set client_fds;
-	fd_set read_fds;
 	uint16_t tmp_id;
 	uint8_t tmp_type;
 	uint16_t tmp_len;
 	uint16_t tmp_req_id;
-	int num_fds;
 	int ret;
 	int i;
 	int icmp_sock ;
@@ -90,17 +86,21 @@ int udpclient(int argc, char* argv[])
 	uint32_t timeexc_ip;
 	signal(SIGINT, &signal_handler);
 	i = 0;
-	if(index(argv[i], 58) || index(argv[i], 46))
+    if(argc > i && (strchr(argv[i], ':') || strchr(argv[i], '.')))
 		lhost = argv[i++];
 	else
 		lhost = NULL;
 	lport = argv[i++];
 	phost = argv[i++];
-	if(index(argv[i], 58) || index(argv[i], 46)) {
+    if(argc > i && (strchr(argv[i], ':') || strchr(argv[i], '.'))) {
 		snprintf(pport_s, 5, "2222");
 		pport = pport_s;
-	} else
+	} else if (argc > i)
 		pport = argv[i++];
+    else {
+        snprintf(pport_s, 5, "2222");
+        pport = pport_s;
+    }
 	rhost = argv[i++];
 	rport = argv[i++];
 	/* Get info about localhost IP */
@@ -144,9 +144,7 @@ int udpclient(int argc, char* argv[])
 		printf("Listening on TCP %s\n",
 			   sock_get_str(tcp_serv, addrstr, sizeof(addrstr)));
 	}
-	FD_ZERO(&client_fds);
 	/* Initialize all the timers */
-	timerclear(&timeout);
 	check_interval.tv_sec = 0;
 	check_interval.tv_usec = 500000;
 	gettimeofday(&check_time, NULL);
@@ -157,18 +155,40 @@ int udpclient(int argc, char* argv[])
 		exit(1);
 	}
 	while(running) {
-		if(!timerisset(&timeout))
-			timeout.tv_usec = 50000;
 		if(++timeexc==100) {
 			timeexc=0;
 			/* Send ICMP TTL exceeded to penetrate remote NAT */
 			send_icmp(icmp_sock, &rsrc, &src, &dest, 0);
 		}
-		read_fds = client_fds;
-		FD_SET(SOCK_FD(tcp_serv), &read_fds);
-		ret = select(FD_SETSIZE, &read_fds, NULL, NULL, &timeout);
-		PERROR_GOTO(ret < 0, "select", done);
-		num_fds = ret;
+
+        int num_clients = LIST_LEN(clients);
+        int num_conn_clients = LIST_LEN(conn_clients);
+        int total_fds = 1 + num_conn_clients + num_clients * 2;
+        struct pollfd *fds = malloc(sizeof(struct pollfd) * total_fds);
+
+        fds[0].fd = SOCK_FD(tcp_serv);
+        fds[0].events = POLLIN;
+        int current_fdi = 1;
+
+        for(i = 0; i < num_conn_clients; i++) {
+            client = list_get_at(conn_clients, i);
+            fds[current_fdi].fd = SOCK_FD(client->udp_sock);
+            fds[current_fdi].events = POLLIN;
+            current_fdi++;
+        }
+        for(i = 0; i < num_clients; i++) {
+            client = list_get_at(clients, i);
+            fds[current_fdi].fd = SOCK_FD(client->udp_sock);
+            fds[current_fdi].events = POLLIN;
+            current_fdi++;
+            fds[current_fdi].fd = SOCK_FD(client->tcp_sock);
+            fds[current_fdi].events = POLLIN;
+            current_fdi++;
+        }
+
+		ret = poll(fds, current_fdi, 50);
+		PERROR_GOTO(ret < 0 && errno != EINTR, "poll", done);
+
 		gettimeofday(&curr_time, NULL);
 		/* Go through all the clients and check if didn't get an ACK for sent
 		   data during the timeout period */
@@ -177,25 +197,27 @@ int udpclient(int argc, char* argv[])
 				client = list_get_at(clients, i);
 				ret = client_check_and_resend(client, curr_time);
 				if(ret == -2) {
-					disconnect_and_remove_client(CLIENT_ID(client), clients,
-												 &client_fds);
+					disconnect_and_remove_client(CLIENT_ID(client), clients);
 					i--;
 					continue;
 				}
 				ret = client_check_and_send_keepalive(client, curr_time);
 				if(ret == -2) {
-					disconnect_and_remove_client(CLIENT_ID(client), clients,
-												 &client_fds);
+					disconnect_and_remove_client(CLIENT_ID(client), clients);
 					i--;
 				}
 			}
 			timeradd(&curr_time, &check_interval, &check_time);
 		}
-		if(num_fds == 0) continue;
+		if(ret <= 0) {
+            free(fds);
+            continue;
+        }
+
 		timeexc=0;
 		/* Check if pending TCP connection to accept and create a new client
 		   and UDP connection if one is ready */
-		if(FD_ISSET(SOCK_FD(tcp_serv), &read_fds)) {
+		if(fds[0].revents & POLLIN) {
 			tcp_sock = sock_accept(tcp_serv);
 			udp_sock = sock_create(phost, pport, ipver,
 								   SOCK_TYPE_UDP, 0, 1);
@@ -210,20 +232,18 @@ int udpclient(int argc, char* argv[])
 				client_free(client);
 				client = NULL;
 				client_send_hello(client2, rhost, rport, CLIENT_ID(client2));
-				client_add_tcp_fd_to_set(client2, &client_fds);
-				client_add_udp_fd_to_set(client2, &client_fds);
 			}
 			sock_free(tcp_sock);
 			sock_free(udp_sock);
 			tcp_sock = NULL;
 			udp_sock = NULL;
-			num_fds--;
 		}
+
 		/* Check for pending handshakes from UDP connection */
-		for(i = 0; i < LIST_LEN(conn_clients) && num_fds > 0; i++) {
+        current_fdi = 1;
+		for(i = 0; i < LIST_LEN(conn_clients); i++) {
 			client = list_get_at(conn_clients, i);
-			if(client_udp_fd_isset(client, &read_fds)) {
-				num_fds--;
+			if(fds[current_fdi].revents & POLLIN) {
 				tmp_req_id = CLIENT_ID(client);
 				ret = client_recv_udp_msg(client, data, sizeof(data),
 										  &tmp_id, &tmp_type, &tmp_len);
@@ -231,57 +251,47 @@ int udpclient(int argc, char* argv[])
 					ret = handle_message(client, tmp_id, tmp_type,
 										 data, tmp_len);
 				if(ret < 0) {
-					disconnect_and_remove_client(tmp_req_id, conn_clients,
-												 &client_fds);
+					disconnect_and_remove_client(tmp_req_id, conn_clients);
 					i--;
 				} else {
 					client = list_add(clients, client);
 					list_delete_at(conn_clients, i);
-					client_remove_udp_fd_from_set(client, &read_fds);
 					i--;
 				}
 			}
+            current_fdi++;
 		}
 		/* Check if data is ready from any of the clients */
-		for(i = 0; i < LIST_LEN(clients) && num_fds > 0; i++) {
+		for(i = 0; i < LIST_LEN(clients); i++) {
 			client = list_get_at(clients, i);
 			/* Check for UDP data */
-			if(client_udp_fd_isset(client, &read_fds)) {
-				num_fds--;
+			if(fds[current_fdi].revents & POLLIN) {
 				ret = client_recv_udp_msg(client, data, sizeof(data),
 										  &tmp_id, &tmp_type, &tmp_len);
 				if(ret == 0)
 					ret = handle_message(client, tmp_id, tmp_type,
 										 data, tmp_len);
 				if(ret < 0) {
-					disconnect_and_remove_client(CLIENT_ID(client), clients,
-												 &client_fds);
+					disconnect_and_remove_client(CLIENT_ID(client), clients);
 					i--;
+                    current_fdi += 2;
 					continue; /* Don't go to check the TCP connection */
 				}
 			}
+            current_fdi++;
 			/* Check for TCP data */
-			if(client_tcp_fd_isset(client, &read_fds)) {
-				num_fds--;
+			if(fds[current_fdi].revents & POLLIN) {
 				ret = client_recv_tcp_data(client);
 				if(ret == 0)
 					ret = client_send_udp_data(client);
-#if 0 /* if udptunnel is taking up 100% of cpu, try including this */
-				else if(ret == 1)
-#ifdef _WIN32
-					_sleep(1);
-#else
-					usleep(1000); /* Quick hack so doesn't use 100% of CPU if
-                                     data wasn't ready yet (waiting for ack) */
-#endif /*WIN32*/
-#endif /*0*/
 				if(ret < 0) {
-					disconnect_and_remove_client(CLIENT_ID(client), clients,
-												 &client_fds);
+					disconnect_and_remove_client(CLIENT_ID(client), clients);
 					i--;
 				}
 			}
+            current_fdi++;
 		}
+        free(fds);
 	}
 done:
 	if(debug_level >= DEBUG_LEVEL1)
@@ -305,7 +315,7 @@ done:
  * Closes the TCP and UDP connections for the client and remove its stuff from
  * the lists.
  */
-void disconnect_and_remove_client(uint16_t id, list_t* clients, fd_set* fds)
+void disconnect_and_remove_client(uint16_t id, list_t* clients)
 {
 	client_t* c;
 	c = list_get(clients, &id);
@@ -314,8 +324,6 @@ void disconnect_and_remove_client(uint16_t id, list_t* clients, fd_set* fds)
 	client_send_goodbye(c);
 	if(debug_level >= DEBUG_LEVEL1)
 		printf("Client %d disconnected.\n", CLIENT_ID(c));
-	client_remove_udp_fd_from_set(c, fds);
-	client_remove_tcp_fd_from_set(c, fds);
 	client_disconnect_tcp(c);
 	client_disconnect_udp(c);
 	list_delete(clients, &id);
@@ -357,7 +365,7 @@ int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 		break;
 	case MSG_TYPE_ACK_SEQ: {
         uint32_t ack_seq;
-        if (data_len >= sizeof(uint32_t)) {
+        if (data_len >= (int)sizeof(uint32_t)) {
             memcpy(&ack_seq, data, sizeof(uint32_t));
             client_handle_ack_seq(c, ntohl(ack_seq));
         }
@@ -375,7 +383,7 @@ int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 	return ret;
 }
 
-void signal_handler(int sig)
+static void signal_handler(int sig)
 {
 	switch(sig) {
 	case SIGINT:
