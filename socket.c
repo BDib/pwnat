@@ -313,8 +313,12 @@ int transport_send(transport_t *t, const char *data, int len) {
     else if (t->type == TRANS_ICE) {
         ice_transport_t *ice = (ice_transport_t *)t->ice_ptr;
         if (ice && ice->negotiated) {
-            return nice_agent_send(ice->agent, ice->stream_id, ice->component_id, len, data);
+            int ret = nice_agent_send(ice->agent, ice->stream_id, ice->component_id, len, data);
+            /* If libnice returns 0, it might be due to component not being ready
+               or buffer full. We return -1 to trigger a retransmission later. */
+            return (ret > 0) ? ret : -1;
         }
+        return 0; /* Silently drop or queue if not negotiated yet */
     }
 #endif
     return -1;

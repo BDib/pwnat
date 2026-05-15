@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/types.h>
 #ifdef _WIN32
 #	include "windoze.h"
 #endif
@@ -34,6 +35,14 @@ int main(int argc, char* argv[])
 {
 	int ret;
 	int isserv = 0;
+
+    /* Check if we are root and warn about security risks */
+    if (getuid() == 0 || geteuid() == 0) {
+        fprintf(stderr, "WARNING: Running with root privileges. This is required for the ICMP trick\n");
+        fprintf(stderr, "but introduces security risks when using complex libraries like GLib/libnice.\n");
+        fprintf(stderr, "Consider using POSIX capabilities (setcap cap_net_raw+ep pwnat) instead of full root.\n\n");
+    }
+
 #ifdef _WIN32
 	WSADATA wsa_data;
 	ret = WSAStartup(MAKEWORD(2,0), &wsa_data);

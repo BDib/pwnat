@@ -17,7 +17,8 @@
 #include "ice_transport.h"
 #endif
 
-#define CLIENT_TIMEOUT 1 /* in seconds */
+#define CLIENT_TIMEOUT_MIN 200 /* in milliseconds */
+#define CLIENT_TIMEOUT_MAX 5000 /* in milliseconds */
 #define CLIENT_MAX_RESEND 10
 #define WINDOW_SIZE 16
 
@@ -30,6 +31,7 @@
 typedef struct {
     char data[MSG_MAX_LEN];
     int len;
+    struct timeval sent_time;
     struct timeval timeout;
     uint32_t seq;
 } window_slot_t;
@@ -51,6 +53,11 @@ typedef struct client {
     window_slot_t window[WINDOW_SIZE];
     uint32_t next_seq;
     uint32_t last_ack;
+
+    /* Dynamic RTO fields (based on RFC 6298) */
+    int srtt;   /* Smoothed Round-Trip Time in ms */
+    int rttvar; /* RTT Variation in ms */
+    int rto;    /* Retransmission Timeout in ms */
 
 	char tcp2udp[MSG_MAX_LEN];
 	int tcp2udp_len;

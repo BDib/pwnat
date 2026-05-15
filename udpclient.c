@@ -78,6 +78,7 @@ int udpclient(int argc, char* argv[])
     int fds_size = 0;
 #ifdef HAVE_NICE
     char *local_sdp = NULL;
+    GMainContext *ctx = g_main_context_default();
 #endif
 
 	signal(SIGINT, &signal_handler);
@@ -158,8 +159,27 @@ int udpclient(int argc, char* argv[])
 
         int num_clients = LIST_LEN(clients);
         int num_conn_clients = LIST_LEN(conn_clients);
-        int needed_fds = 1 + num_conn_clients + num_clients * 2;
+        int base_fds = 1 + num_conn_clients + num_clients * 2;
+        int glib_fds_count = 0;
 
+#ifdef HAVE_NICE
+        gint priority;
+        gint timeout_ms;
+        GPollFD *glib_fds = NULL;
+        g_main_context_prepare(ctx, &priority);
+        while (1) {
+            gint n = g_main_context_query(ctx, priority, &timeout_ms, NULL, 0);
+            glib_fds = g_new(GPollFD, n);
+            gint n2 = g_main_context_query(ctx, priority, &timeout_ms, glib_fds, n);
+            if (n2 <= n) {
+                glib_fds_count = n2;
+                break;
+            }
+            g_free(glib_fds);
+        }
+#endif
+
+        int needed_fds = base_fds + glib_fds_count;
         if (needed_fds > fds_size) {
             fds_size = needed_fds + 10;
             fds = realloc(fds, sizeof(struct pollfd) * fds_size);
@@ -186,8 +206,25 @@ int udpclient(int argc, char* argv[])
             current_fdi++;
         }
 
+#ifdef HAVE_NICE
+        for (i = 0; i < glib_fds_count; i++) {
+            fds[current_fdi].fd = glib_fds[i].fd;
+            fds[current_fdi].events = glib_fds[i].events;
+            current_fdi++;
+        }
+#endif
+
 		ret = poll(fds, current_fdi, 50);
 		PERROR_GOTO(ret < 0 && errno != EINTR, "poll", done);
+
+#ifdef HAVE_NICE
+        for (i = 0; i < glib_fds_count; i++) {
+            glib_fds[i].revents = fds[base_fds + i].revents;
+        }
+        g_main_context_check(ctx, priority, glib_fds, glib_fds_count);
+        g_main_context_dispatch(ctx);
+        g_free(glib_fds);
+#endif
 
 		gettimeofday(&curr_time, NULL);
 		if(timercmp(&curr_time, &check_time, >)) {
@@ -208,12 +245,13 @@ int udpclient(int argc, char* argv[])
 			timeradd(&curr_time, &check_interval, &check_time);
 		}
 
-        /* Even if poll timeout, we might need to check ICE contexts */
+        /* Check ICE contexts for incoming data - non-blocking pull from libnice buffers */
         for(i = 0; i < LIST_LEN(clients); i++) {
             client = list_get_at(clients, i);
             if (client->transport.type == TRANS_ICE) {
-                ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len);
-                if (ret == 0) handle_message(client, tmp_id, tmp_type, data, tmp_len);
+                while ((ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len)) == 0) {
+                    handle_message(client, tmp_id, tmp_type, data, tmp_len);
+                }
             }
         }
 
@@ -287,8 +325,6 @@ int udpclient(int argc, char* argv[])
 			client = list_get_at(clients, i);
             tmp_req_id = CLIENT_ID(client);
 
-            /* Fallback to ICE if negotiated and UDP seems dead?
-               Or just check both. */
             if (client->ice && client->ice->negotiated && client->transport.type == TRANS_UDP) {
                 printf("Switching to ICE transport for client %d\n", client->id);
                 client->transport.type = TRANS_ICE;
@@ -399,7 +435,6 @@ int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 			ret = client_send_tcp_data(c);
         break;
     case MSG_TYPE_ICE_SDP:
-        /* Already handled in main loop if needed, but let's be safe */
         break;
 	default:
 		ret = -1;

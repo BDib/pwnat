@@ -37,6 +37,12 @@ client_t* client_create(uint16_t id, socket_t* tcp_sock, transport_t *trans,
     c->expected_seq = 0;
     c->next_seq = 0;
     c->last_ack = 0;
+
+    /* Initial RTO values as per RFC 6298 */
+    c->srtt = -1;
+    c->rttvar = 0;
+    c->rto = 1000; /* Start with 1 second */
+
 	timerclear(&c->keepalive);
 	c->resend_count = 0;
 #ifdef HAVE_NICE
@@ -197,6 +203,15 @@ int client_recv_tcp_data(client_t* client)
 	return 0;
 }
 
+static void tv_add_ms(struct timeval *out, struct timeval *in, int ms) {
+    out->tv_sec = in->tv_sec + (ms / 1000);
+    out->tv_usec = in->tv_usec + ((ms % 1000) * 1000);
+    if (out->tv_usec >= 1000000) {
+        out->tv_sec++;
+        out->tv_usec -= 1000000;
+    }
+}
+
 int client_send_udp_data(client_t* client)
 {
     uint32_t seq = client->next_seq++;
@@ -204,8 +219,8 @@ int client_send_udp_data(client_t* client)
     memcpy(client->window[slot].data, client->tcp2udp, client->tcp2udp_len);
     client->window[slot].len = client->tcp2udp_len;
     client->window[slot].seq = seq;
-    gettimeofday(&client->window[slot].timeout, NULL);
-    client->window[slot].timeout.tv_sec += CLIENT_TIMEOUT;
+    gettimeofday(&client->window[slot].sent_time, NULL);
+    tv_add_ms(&client->window[slot].timeout, &client->window[slot].sent_time, client->rto);
 
     char buf[MSG_MAX_LEN + sizeof(uint32_t)];
     uint32_t nseq = htonl(seq);
@@ -233,6 +248,24 @@ int client_got_ack(client_t* client, uint8_t ack_type)
 
 void client_handle_ack_seq(client_t* client, uint32_t ack_seq) {
     if ((int32_t)(ack_seq - client->last_ack) >= 0) {
+        /* Update RTT estimate if this was the first transmission of this packet */
+        int slot = ack_seq % WINDOW_SIZE;
+        if (client->window[slot].seq == ack_seq) {
+            struct timeval now;
+            gettimeofday(&now, NULL);
+            int rtt = (int)((now.tv_sec - client->window[slot].sent_time.tv_sec) * 1000 +
+                      (now.tv_usec - client->window[slot].sent_time.tv_usec) / 1000);
+
+            if (client->srtt < 0) {
+                client->srtt = rtt;
+                client->rttvar = rtt / 2;
+            } else {
+                client->rttvar = (int)(0.75 * client->rttvar + 0.25 * abs(client->srtt - rtt));
+                client->srtt = (int)(0.875 * client->srtt + 0.125 * rtt);
+            }
+            client->rto = client->srtt + MAX(100, 4 * client->rttvar);
+            client->rto = MIN(CLIENT_TIMEOUT_MAX, MAX(CLIENT_TIMEOUT_MIN, client->rto));
+        }
         client->last_ack = ack_seq + 1;
     }
 }
@@ -274,8 +307,12 @@ int client_check_and_resend(client_t* client, struct timeval curr_tv)
             memcpy(buf + sizeof(uint32_t), client->window[slot].data, client->window[slot].len);
             msg_send_msg(&client->transport, client->id, MSG_TYPE_DATA_SEQ,
                            buf, client->window[slot].len + (int)sizeof(uint32_t));
-            client->window[slot].timeout = curr_tv;
-            client->window[slot].timeout.tv_sec += CLIENT_TIMEOUT;
+
+            /* Exponential backoff on RTO when timeout occurs */
+            client->rto = MIN(CLIENT_TIMEOUT_MAX, client->rto * 2);
+
+            client->window[slot].sent_time = curr_tv;
+            tv_add_ms(&client->window[slot].timeout, &curr_tv, client->rto);
         }
     }
 	return 0;

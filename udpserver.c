@@ -77,6 +77,9 @@ int udpserver(int argc, char* argv[])
 	struct hostent* host_ent;
     struct pollfd *fds = NULL;
     int fds_size = 0;
+#ifdef HAVE_NICE
+    GMainContext *ctx = g_main_context_default();
+#endif
 
 	signal(SIGINT, &signal_handler);
 
@@ -195,8 +198,27 @@ int udpserver(int argc, char* argv[])
 		}
 
         int num_clients = LIST_LEN(clients);
-        int needed_fds = 1 + num_clients;
+        int base_fds = 1 + num_clients;
+        int glib_fds_count = 0;
 
+#ifdef HAVE_NICE
+        gint priority;
+        gint timeout_ms;
+        GPollFD *glib_fds = NULL;
+        g_main_context_prepare(ctx, &priority);
+        while (1) {
+            gint n = g_main_context_query(ctx, priority, &timeout_ms, NULL, 0);
+            glib_fds = g_new(GPollFD, n);
+            gint n2 = g_main_context_query(ctx, priority, &timeout_ms, glib_fds, n);
+            if (n2 <= n) {
+                glib_fds_count = n2;
+                break;
+            }
+            g_free(glib_fds);
+        }
+#endif
+
+        int needed_fds = base_fds + glib_fds_count;
         if (needed_fds > fds_size) {
             fds_size = needed_fds + 10;
             fds = realloc(fds, sizeof(struct pollfd) * fds_size);
@@ -211,8 +233,24 @@ int udpserver(int argc, char* argv[])
             fds[i+1].events = POLLIN;
         }
 
+#ifdef HAVE_NICE
+        for (i = 0; i < glib_fds_count; i++) {
+            fds[base_fds + i].fd = glib_fds[i].fd;
+            fds[base_fds + i].events = glib_fds[i].events;
+        }
+#endif
+
 		ret = poll(fds, needed_fds, 50);
 		PERROR_GOTO(ret < 0 && errno != EINTR, "poll", done);
+
+#ifdef HAVE_NICE
+        for (i = 0; i < glib_fds_count; i++) {
+            glib_fds[i].revents = fds[base_fds + i].revents;
+        }
+        g_main_context_check(ctx, priority, glib_fds, glib_fds_count);
+        g_main_context_dispatch(ctx);
+        g_free(glib_fds);
+#endif
 
 		gettimeofday(&curr_time, NULL);
 		if(timercmp(&curr_time, &check_time, >)) {
@@ -237,14 +275,14 @@ int udpserver(int argc, char* argv[])
             client = list_get_at(clients, i);
 #ifdef HAVE_NICE
             if (client->ice && client->ice->negotiated && client->transport.type == TRANS_UDP) {
-                /* Server also switches if ICE is ready and UDP might be blocked */
                 client->transport.type = TRANS_ICE;
                 client->transport.ice_ptr = client->ice;
             }
 #endif
             if (client->transport.type == TRANS_ICE) {
-                ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len);
-                if (ret == 0) handle_message(client->id, tmp_type, data, tmp_len, &client->transport, clients, allowed_destinations, port_str);
+                while ((ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len)) == 0) {
+                    handle_message(client->id, tmp_type, data, tmp_len, &client->transport, clients, allowed_destinations, port_str);
+                }
             }
         }
 
