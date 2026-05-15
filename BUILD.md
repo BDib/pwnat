@@ -6,7 +6,7 @@ pwnat supports both **CMake** and **Meson** build systems, providing consistent 
 
 - **C compiler** with C11 support (e.g., GCC, Clang, or MSVC)
 - **CMake** (version 3.10 or higher) **OR** **Meson** (and **Ninja**)
-- **libnice-dev** (Optional but recommended for ICE/STUN/TURN support)
+- **libnice-dev** (Required for ICE/STUN/TURN support)
   - On Ubuntu/Debian: `sudo apt-get install libnice-dev`
 
 ## Build Steps (Linux and macOS)

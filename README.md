@@ -28,6 +28,8 @@ This modernized version of pwnat includes:
 - **Sliding Window Protocol:** Uses sequence numbers and a sliding window to allow multiple packets in flight. This significantly increases speed over high-latency or high-packet-loss connections.
 - **Optional Encryption:** Secure your tunnel with a shared secret key (`-k` flag). Data is encrypted via XOR before being sent over the UDP tunnel.
 - **Scalable I/O:** Migrated from the old `select()` system to `poll()`. This allows pwnat to handle many more simultaneous connections efficiently.
+- **ICE/STUN/TURN Support:** Automatic fallback to ICE negotiation (via `libnice`) when direct NAT traversal fails. This overcomes strict SPI firewalls and raw socket restrictions.
+- **Relay Mode:** A new mode allowing pwnat to act as a STUN/TURN-like relay server.
 - **Modern Build Systems:** Now supports both **CMake** and **Meson** for easy, cross-platform building.
 
 ---
@@ -44,7 +46,7 @@ This modernized version of pwnat includes:
 ## ⚡ Quick Start
 
 ### Build
-Requirements: C11 compiler and either CMake 3.10+ or Meson.
+Requirements: C11 compiler and either CMake 3.10+ or Meson. `libnice-dev` is required for ICE support.
 
 **Using CMake:**
 ```bash
@@ -69,6 +71,18 @@ sudo ./pwnat -s -k mypassword
 Connect to `google.com:80` through your pwnat server:
 ```bash
 sudo ./pwnat -c 8000 <server_public_ip> google.com 80 -k mypassword
+```
+
+### Relay / STUN Mode
+Run pwnat as a relay on a public IP:
+```bash
+./pwnat -r <stun_server_ip>
+```
+
+### Fallback to ICE/STUN/TURN
+If you are behind a strict NAT, provide a STUN/TURN server:
+```bash
+sudo ./pwnat -c 8000 <server_public_ip> google.com 80 -t turn.example.com -u user -p pass
 ```
 Now, open your browser and go to `http://localhost:8000`!
 
@@ -95,7 +109,7 @@ To verify pwnat is working correctly in your environment:
 ## ⚙️ Usage Details
 
 ```
-usage: ./pwnat <-s | -c> [-k key] <args>
+usage: ./pwnat <-s | -c | -r stun_server> [-k key] [-t turn_server -u user -p pass] <args>
 
   -c    client mode
         args: [local ip] <local port> <proxy host> [proxy port (def:2222)] <remote host> <remote port>
@@ -103,7 +117,13 @@ usage: ./pwnat <-s | -c> [-k key] <args>
   -s    server mode
         args: [local ip] [proxy port (def:2222)] [[allowed host]:[allowed port] ...]
 
+  -r    relay mode (act as a STUN/TURN-like relay)
+        args: <stun_server_ip>
+
   -k    encryption key (shared secret)
+  -t    TURN server (optional fallback)
+  -u    TURN username
+  -p    TURN password
   -6    use IPv6
   -v    verbose output (use -vv or -vvv for more detail)
   -h    show this help
