@@ -37,6 +37,7 @@ struct sockaddr_in remote;
 
 int debug_level = 1; /* NO_DEBUG; */
 int ipver = SOCK_IPV4;
+char* opt_key = NULL;
 
 int udpclient(int argc, char* argv[]);
 int udpserver(int argc, char* argv[]);
@@ -51,8 +52,11 @@ int main(int argc, char* argv[])
 	ret = WSAStartup(MAKEWORD(2,0), &wsa_data);
 	ERROR_GOTO(ret != 0, "WSAStartup() failed", error);
 #endif
-	while((ret = getopt(argc, argv, "hscv6")) != EOF) {
+	while((ret = getopt(argc, argv, "hscv6k:")) != EOF) {
 		switch(ret) {
+		case 'k':
+			opt_key = optarg;
+			break;
 		case '6':
 			ipver = SOCK_IPV6;
 			break;
@@ -93,11 +97,12 @@ error:
 
 void usage(char* progname)
 {
-	printf("usage: %s <-s | -c> <args>\n", progname);
+	printf("usage: %s <-s | -c> [-k key] <args>\n", progname);
 	printf("  -c    client mode (default)\n"
 		   "        <args>: [local ip] <local port> <proxy host> [proxy port (def:2222)] <remote host> <remote port>\n"
 		   "  -s    server mode\n"
 		   "        <args>: [local ip] [proxy port (def:2222)] [[allowed host]:[allowed port] ...]\n"
+		   "  -k    encryption key (optional)\n"
 		   "  -6    use IPv6\n"
 		   "  -v    show debug output (up to 2)\n"
 		   "  -h    show this help and exit\n");

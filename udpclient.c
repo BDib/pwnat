@@ -355,6 +355,19 @@ int handle_message(client_t* c, uint16_t id, uint8_t msg_type,
 	case MSG_TYPE_ACK1:
 		ret = client_got_ack(c, msg_type);
 		break;
+	case MSG_TYPE_ACK_SEQ: {
+        uint32_t ack_seq;
+        if (data_len >= sizeof(uint32_t)) {
+            memcpy(&ack_seq, data, sizeof(uint32_t));
+            client_handle_ack_seq(c, ntohl(ack_seq));
+        }
+        break;
+    }
+    case MSG_TYPE_DATA_SEQ:
+        ret = client_got_udp_data(c, data, data_len, msg_type);
+		if(ret == 0)
+			ret = client_send_tcp_data(c);
+        break;
 	default:
 		ret = -1;
 		break;

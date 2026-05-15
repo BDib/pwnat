@@ -31,12 +31,20 @@
 
 #define CLIENT_TIMEOUT 1 /* in seconds */
 #define CLIENT_MAX_RESEND 10
+#define WINDOW_SIZE 16
 
 #define CLIENT_WAIT_HELLO 1
 #define CLIENT_WAIT_DATA0 2
 #define CLIENT_WAIT_DATA1 3
 #define CLIENT_WAIT_ACK0  4
 #define CLIENT_WAIT_ACK1  5
+
+typedef struct {
+    char data[MSG_MAX_LEN];
+    int len;
+    struct timeval timeout;
+    uint32_t seq;
+} window_slot_t;
 
 typedef struct client {
 	uint16_t id; /* Must be first in struct */
@@ -49,8 +57,13 @@ typedef struct client {
 	char udp2tcp[MSG_MAX_LEN];
 	int udp2tcp_len;
 	int udp2tcp_state;
+    uint32_t expected_seq;
 
 	/* For data going from TCP connection to UDP tunnel */
+    window_slot_t window[WINDOW_SIZE];
+    uint32_t next_seq;
+    uint32_t last_ack;
+
 	char tcp2udp[MSG_MAX_LEN];
 	int tcp2udp_len;
 	int tcp2udp_state;
@@ -76,6 +89,7 @@ int client_send_tcp_data(client_t* client);
 int client_recv_tcp_data(client_t* client);
 int client_send_udp_data(client_t* client);
 int client_got_ack(client_t* client, uint8_t ack_type);
+void client_handle_ack_seq(client_t* client, uint32_t ack_seq);
 int client_send_hello(client_t* client, char* host, char* port,
 					  uint16_t req_id);
 int client_send_helloack(client_t* client, uint16_t req_id);

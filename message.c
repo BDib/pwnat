@@ -30,6 +30,9 @@
 #include "common.h"
 #include "message.h"
 #include "socket.h"
+#include "crypto.h"
+
+extern char* opt_key;
 
 /*
  * Sends a message to the UDP tunnel with the specified client ID, type, and
@@ -49,7 +52,12 @@ int msg_send_msg(socket_t* to, uint16_t client_id, uint8_t type,
 	case MSG_TYPE_HELLOACK:
 	case MSG_TYPE_DATA0:
 	case MSG_TYPE_DATA1:
+    case MSG_TYPE_DATA_SEQ:
+    case MSG_TYPE_ACK_SEQ:
 		memcpy(buf+sizeof(msg_hdr_t), data, data_len);
+        if (opt_key) {
+            crypto_xor(buf + sizeof(msg_hdr_t), data_len, opt_key);
+        }
 		break;
 	case MSG_TYPE_GOODBYE:
 	case MSG_TYPE_KEEPALIVE:
@@ -125,9 +133,12 @@ int msg_recv_msg(socket_t* sock, socket_t* from, char* data, int data_len,
 	*client_id = msg_get_client_id(hdr_ptr);
 	*type = msg_get_type(hdr_ptr);
 	*length = msg_get_length(hdr_ptr);
-	if(ret-sizeof(msg_hdr_t) != *length)
+	if(ret-(int)sizeof(msg_hdr_t) != *length)
 		return -1;
 	*length = MIN(data_len, *length);
 	memcpy(data, msg_ptr, *length);
+    if (opt_key) {
+        crypto_xor(data, *length, opt_key);
+    }
 	return 0;
 }

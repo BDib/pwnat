@@ -43,6 +43,8 @@
 #define MSG_TYPE_DATA1		0x06
 #define MSG_TYPE_ACK0		0x07
 #define MSG_TYPE_ACK1		0x08
+#define MSG_TYPE_DATA_SEQ	0x09
+#define MSG_TYPE_ACK_SEQ	0x0A
 
 #ifndef _WIN32
 struct msg_hdr {
