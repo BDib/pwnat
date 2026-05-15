@@ -28,7 +28,7 @@ This modernized version of pwnat includes:
 - **Sliding Window Protocol:** Uses sequence numbers and a sliding window to allow multiple packets in flight. This significantly increases speed over high-latency or high-packet-loss connections.
 - **Optional Encryption:** Secure your tunnel with a shared secret key (`-k` flag). Data is encrypted via XOR before being sent over the UDP tunnel.
 - **Scalable I/O:** Migrated from the old `select()` system to `poll()`. This allows pwnat to handle many more simultaneous connections efficiently.
-- **Simplified Build:** Now uses **CMake** for easy building on Linux, macOS, and Windows.
+- **Modern Build Systems:** Now supports both **CMake** and **Meson** for easy, cross-platform building.
 
 ---
 
@@ -44,11 +44,19 @@ This modernized version of pwnat includes:
 ## ⚡ Quick Start
 
 ### Build
-Requirements: CMake 3.10+ and a C11 compiler.
+Requirements: C11 compiler and either CMake 3.10+ or Meson.
+
+**Using CMake:**
 ```bash
 mkdir build && cd build
 cmake ..
 make
+```
+
+**Using Meson:**
+```bash
+meson setup build
+meson compile -C build
 ```
 
 ### Server Mode (Behind NAT B)

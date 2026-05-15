@@ -1,32 +1,36 @@
 # Building pwnat
 
-pwnat uses **CMake** as its build system, which provides a consistent way to build the project across Linux, macOS, and Windows.
+pwnat supports both **CMake** and **Meson** build systems, providing consistent cross-platform builds for Linux, macOS, and Windows.
 
 ## Prerequisites
 
-- **CMake** (version 3.10 or higher)
 - **C compiler** with C11 support (e.g., GCC, Clang, or MSVC)
-- **Make** (on Unix-like systems)
+- **CMake** (version 3.10 or higher) **OR** **Meson** (and **Ninja**)
+- **libnice-dev** (Optional but recommended for ICE/STUN/TURN support)
+  - On Ubuntu/Debian: `sudo apt-get install libnice-dev`
 
 ## Build Steps (Linux and macOS)
 
+### Using CMake
 1. **Create a build directory:**
    ```bash
-   mkdir build
-   cd build
+   mkdir build && cd build
    ```
-
-2. **Configure the project:**
+2. **Configure and build:**
    ```bash
    cmake ..
-   ```
-
-3. **Build the executable:**
-   ```bash
    make
    ```
 
-The `pwnat` binary will be located in the `build` directory.
+### Using Meson
+1. **Configure the project:**
+   ```bash
+   meson setup build
+   ```
+2. **Build the executable:**
+   ```bash
+   meson compile -C build
+   ```
 
 ## Build Steps (Windows)
 
@@ -36,16 +40,11 @@ The `pwnat` binary will be located in the `build` directory.
    mkdir build
    cd build
    ```
-3. **Configure the project:**
+3. **Configure and build (CMake):**
    ```powershell
    cmake ..
-   ```
-4. **Build the project:**
-   ```powershell
    cmake --build . --config Release
    ```
-
-The `pwnat.exe` binary will be located in the `build/Release` directory.
 
 ## Permissions
 
