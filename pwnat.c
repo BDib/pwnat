@@ -1,30 +1,12 @@
 /*
  * pwnat, by Samy Kamkar
- * based off of udptunnel
- *
- * udptunnel original comments:
- *
- * Copyright (C) 2009 Daniel Meekins
- * Contact: dmeekins - gmail
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
-
 #include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
 #ifdef _WIN32
 #	include "windoze.h"
 #endif
@@ -35,24 +17,55 @@
 int opt_debug = 0;
 struct sockaddr_in remote;
 
-int debug_level = 1; /* NO_DEBUG; */
+int debug_level = 1;
 int ipver = SOCK_IPV4;
+char* opt_key = NULL;
+char* opt_stun = NULL;
+char* opt_turn = NULL;
+char* opt_turn_user = NULL;
+char* opt_turn_pass = NULL;
+int opt_relay = 0;
 
 int udpclient(int argc, char* argv[]);
 int udpserver(int argc, char* argv[]);
+int udprelay(const char *stun_addr);
 void usage(char* progname);
 
 int main(int argc, char* argv[])
 {
 	int ret;
 	int isserv = 0;
+
+    /* Check if we are root and warn about security risks */
+    if (getuid() == 0 || geteuid() == 0) {
+        fprintf(stderr, "WARNING: Running with root privileges. This is required for the ICMP trick\n");
+        fprintf(stderr, "but introduces security risks when using complex libraries like GLib/libnice.\n");
+        fprintf(stderr, "Consider using POSIX capabilities (setcap cap_net_raw+ep pwnat) instead of full root.\n\n");
+    }
+
 #ifdef _WIN32
 	WSADATA wsa_data;
 	ret = WSAStartup(MAKEWORD(2,0), &wsa_data);
 	ERROR_GOTO(ret != 0, "WSAStartup() failed", error);
 #endif
-	while((ret = getopt(argc, argv, "hscv6")) != EOF) {
+	while((ret = getopt(argc, argv, "hscv6k:t:u:p:r:")) != EOF) {
 		switch(ret) {
+		case 'k':
+			opt_key = optarg;
+			break;
+		case 't':
+			opt_turn = optarg;
+			break;
+		case 'u':
+			opt_turn_user = optarg;
+			break;
+		case 'p':
+			opt_turn_pass = optarg;
+			break;
+		case 'r':
+			opt_relay = 1;
+			opt_stun = optarg;
+			break;
 		case '6':
 			ipver = SOCK_IPV6;
 			break;
@@ -67,13 +80,14 @@ int main(int argc, char* argv[])
 				debug_level++;
 			break;
 		case 'h':
-			/* fall through */
 		default:
 			goto error;
 		}
 	}
 	ret = 0;
-	if(isserv) {
+	if (opt_relay) {
+		ret = udprelay(opt_stun);
+	} else if(isserv) {
 		if(argc - optind < 0)
 			goto error;
 		ret = udpserver(argc - optind, argv + optind);
@@ -93,12 +107,18 @@ error:
 
 void usage(char* progname)
 {
-	printf("usage: %s <-s | -c> <args>\n", progname);
+	printf("usage: %s <-s | -c | -r stun_server> [-k key] [-t turn_server -u user -p pass] <args>\n", progname);
 	printf("  -c    client mode (default)\n"
 		   "        <args>: [local ip] <local port> <proxy host> [proxy port (def:2222)] <remote host> <remote port>\n"
 		   "  -s    server mode\n"
 		   "        <args>: [local ip] [proxy port (def:2222)] [[allowed host]:[allowed port] ...]\n"
+		   "  -r    relay mode (act as a STUN/TURN-like relay)\n"
+		   "        <args>: <stun_server_ip>\n"
+		   "  -k    encryption key (optional)\n"
+		   "  -t    TURN server (optional fallback)\n"
+		   "  -u    TURN username\n"
+		   "  -p    TURN password\n"
 		   "  -6    use IPv6\n"
-		   "  -v    show debug output (up to 2)\n"
+		   "  -v    show debug output (up to 3)\n"
 		   "  -h    show this help and exit\n");
 }

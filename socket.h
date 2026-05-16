@@ -43,12 +43,23 @@
 #define SIN(sa) ((struct sockaddr_in *)sa)
 #define SIN6(sa) ((struct sockaddr_in6 *)sa)
 
+typedef enum {
+    TRANS_UDP,
+    TRANS_ICE
+} transport_type_t;
+
 typedef struct socket {
 	int fd;							/* Socket file descriptor to send/recv on */
 	int type;						/* SOCK_STREAM or SOCK_DGRAM */
 	struct sockaddr_storage addr;	/* IP and port */
 	socklen_t addr_len;				/* Length of sockaddr type */
 } socket_t;
+
+typedef struct transport {
+    transport_type_t type;
+    socket_t *sock;
+    void *ice_ptr; /* Pointer to ice_transport_t */
+} transport_t;
 
 #define SOCK_FD(s) ((s)->fd)
 #define SOCK_LEN(s) ((s)->addr_len)
@@ -67,6 +78,9 @@ char* sock_get_str(socket_t* s, char* buf, int len);
 char* sock_get_addrstr(socket_t* s, char* buf, int len);
 uint16_t sock_get_port(socket_t* s);
 int sock_recv(socket_t* sock, socket_t* from, char* data, int len);
-int sock_send(socket_t* to, char* data, int len);
+int sock_send(socket_t* to, const char* data, int len);
+
+int transport_send(transport_t *t, const char *data, int len);
+int transport_recv(transport_t *t, socket_t *from, char *data, int len);
 
 #endif /* SOCKET_H */
