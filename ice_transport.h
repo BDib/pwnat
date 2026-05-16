@@ -12,6 +12,7 @@ typedef struct {
     gboolean negotiated;
     char recv_buf[8192];
     int recv_buf_len;
+    GMutex mutex;
 } ice_transport_t;
 
 ice_transport_t* ice_transport_create(const char *stun_addr, const char *turn_addr, const char *turn_user, const char *turn_pass);

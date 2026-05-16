@@ -19,16 +19,19 @@ static void cb_component_state_changed(NiceAgent *agent, guint stream_id, guint 
 
 static void cb_nice_recv(NiceAgent *agent, guint stream_id, guint component_id, guint len, gchar *buf, gpointer user_data) {
     ice_transport_t *ice = (ice_transport_t *)user_data;
+    g_mutex_lock(&ice->mutex);
     if (ice->recv_buf_len + len <= sizeof(ice->recv_buf)) {
         memcpy(ice->recv_buf + ice->recv_buf_len, buf, len);
         ice->recv_buf_len += len;
     }
+    g_mutex_unlock(&ice->mutex);
 }
 
 ice_transport_t* ice_transport_create(const char *stun_addr, const char *turn_addr, const char *turn_user, const char *turn_pass) {
     ice_transport_t *ice = calloc(1, sizeof(ice_transport_t));
     ice->loop = g_main_loop_new(NULL, FALSE);
     ice->agent = nice_agent_new(g_main_loop_get_context(ice->loop), NICE_COMPATIBILITY_RFC5245);
+    g_mutex_init(&ice->mutex);
 
     if (stun_addr) {
         g_object_set(ice->agent, "stun-server", stun_addr, NULL);
@@ -50,6 +53,7 @@ ice_transport_t* ice_transport_create(const char *stun_addr, const char *turn_ad
 
 void ice_transport_free(ice_transport_t *ice) {
     if (ice) {
+        g_mutex_clear(&ice->mutex);
         g_object_unref(ice->agent);
         g_main_loop_unref(ice->loop);
         free(ice);

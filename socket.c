@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <errno.h>
 
 #include <unistd.h>
 #include <inttypes.h>
@@ -18,7 +19,6 @@
 #	include "windoze.h"
 #endif /*WIN32*/
 
-#include <errno.h>
 #include "socket.h"
 #include "common.h"
 #ifdef HAVE_NICE
@@ -314,11 +314,9 @@ int transport_send(transport_t *t, const char *data, int len) {
         ice_transport_t *ice = (ice_transport_t *)t->ice_ptr;
         if (ice && ice->negotiated) {
             int ret = nice_agent_send(ice->agent, ice->stream_id, ice->component_id, len, data);
-            /* If libnice returns 0, it might be due to component not being ready
-               or buffer full. We return -1 to trigger a retransmission later. */
             return (ret > 0) ? ret : -1;
         }
-        return 0; /* Silently drop or queue if not negotiated yet */
+        return 0;
     }
 #endif
     return -1;
@@ -332,17 +330,18 @@ int transport_recv(transport_t *t, socket_t *from, char *data, int len) {
     else if (t->type == TRANS_ICE) {
         ice_transport_t *ice = (ice_transport_t *)t->ice_ptr;
         if (ice && ice->negotiated) {
-             g_main_context_iteration(g_main_loop_get_context(ice->loop), FALSE);
+             int to_copy = 0;
+             g_mutex_lock(&ice->mutex);
              if (ice->recv_buf_len > 0) {
-                 int to_copy = MIN(len, ice->recv_buf_len);
+                 to_copy = MIN(len, ice->recv_buf_len);
                  memcpy(data, ice->recv_buf, to_copy);
                  if (to_copy < ice->recv_buf_len) {
                      memmove(ice->recv_buf, ice->recv_buf + to_copy, ice->recv_buf_len - to_copy);
                  }
                  ice->recv_buf_len -= to_copy;
-                 return to_copy;
              }
-             return 0;
+             g_mutex_unlock(&ice->mutex);
+             return to_copy;
         }
     }
 #endif

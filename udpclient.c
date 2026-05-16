@@ -161,18 +161,21 @@ int udpclient(int argc, char* argv[])
         int num_conn_clients = LIST_LEN(conn_clients);
         int base_fds = 1 + num_conn_clients + num_clients * 2;
         int glib_fds_count = 0;
+        int timeout_ms = 50;
 
 #ifdef HAVE_NICE
         gint priority;
-        gint timeout_ms;
+        gint g_timeout;
         GPollFD *glib_fds = NULL;
         g_main_context_prepare(ctx, &priority);
         while (1) {
-            gint n = g_main_context_query(ctx, priority, &timeout_ms, NULL, 0);
+            gint n = g_main_context_query(ctx, priority, &g_timeout, NULL, 0);
             glib_fds = g_new(GPollFD, n);
-            gint n2 = g_main_context_query(ctx, priority, &timeout_ms, glib_fds, n);
+            gint n2 = g_main_context_query(ctx, priority, &g_timeout, glib_fds, n);
             if (n2 <= n) {
                 glib_fds_count = n2;
+                if (g_timeout != -1 && (timeout_ms == -1 || g_timeout < timeout_ms))
+                    timeout_ms = g_timeout;
                 break;
             }
             g_free(glib_fds);
@@ -214,7 +217,7 @@ int udpclient(int argc, char* argv[])
         }
 #endif
 
-		ret = poll(fds, current_fdi, 50);
+		ret = poll(fds, current_fdi, timeout_ms);
 		PERROR_GOTO(ret < 0 && errno != EINTR, "poll", done);
 
 #ifdef HAVE_NICE
@@ -245,17 +248,16 @@ int udpclient(int argc, char* argv[])
 			timeradd(&curr_time, &check_interval, &check_time);
 		}
 
-        /* Check ICE contexts for incoming data - non-blocking pull from libnice buffers */
         for(i = 0; i < LIST_LEN(clients); i++) {
             client = list_get_at(clients, i);
             if (client->transport.type == TRANS_ICE) {
-                while ((ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len)) == 0) {
+                while ((ret = client_recv_udp_msg(client, data, sizeof(data), &tmp_id, &tmp_type, &tmp_len)) > 0) {
                     handle_message(client, tmp_id, tmp_type, data, tmp_len);
                 }
             }
         }
 
-		if(ret <= 0) continue;
+		if(ret < 0) continue;
 
 		if(fds[0].revents & POLLIN) {
 			tcp_sock = sock_accept(tcp_serv);
